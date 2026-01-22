@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eye-Tracked Particle System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+        #info { position: absolute; top: 20px; left: 20px; color: white; pointer-events: none; z-index: 10; }
+        canvas { display: block; }
+        video { display: none; }
+        .status { font-size: 0.8em; color: #0af; }
+    </style>
+</head>
+<body>
+
+<div id="info">
+    <h2>Eye-Flow Particles</h2>
+    <p>Move Eyes: Control Particles | Blink: Change Shape & Color</p>
+    <p id="current-shape" class="status">Shape: Sphere</p>
+</div>
+<video id="video" playsinline></video>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+<script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+
+    const PARTICLE_COUNT = 8000;
+    let scene, camera, renderer, points;
+    let currentShapeIndex = 0;
+    let targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+    let lastBlinkTime = 0;
+
+    // --- Shape Logic ---
+    const shapes = [
+        { name: "Sphere", func: (i) => {
+            const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+            const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+            return new THREE.Vector3(2 * Math.cos(theta) * Math.sin(phi), 2 * Math.sin(theta) * Math.sin(phi), 2 * Math.cos(phi));
+        }},
+        { name: "Saturn", func: (i) => {
+            if (i < PARTICLE_COUNT * 0.6) {
+                const phi = Math.acos(-1 + (2 * i) / (PARTICLE_COUNT * 0.6));
+                const theta = Math.sqrt(PARTICLE_COUNT * 0.6 * Math.PI) * phi;
+                return new THREE.Vector3(1.5 * Math.cos(theta) * Math.sin(phi), 1.5 * Math.sin(theta) * Math.sin(phi), 1.5 * Math.cos(phi));
+            } else {
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 2.2 + Math.random() * 1.5;
+                return new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius * 0.3, (Math.random() - 0.5) * 0.2);
+            }
+        }},
+        { name: "Heart", func: (i) => {
+            const t = (i / PARTICLE_COUNT) * Math.PI * 2;
+            const x = 16 * Math.pow(Math.sin(t), 3);
+            const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+            return new THREE.Vector3(x * 0.15, y * 0.15, (Math.random() - 0.5) * 0.5);
+        }}
+    ];
+
+    // --- Three.js Setup ---
+    function init() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 7;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const geo = new THREE.BufferGeometry();
+        const pos = new Float32Array(PARTICLE_COUNT * 3);
+        const cols = new Float32Array(PARTICLE_COUNT * 3);
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            cols[i*3] = 0.5 + Math.random() * 0.5;
+            cols[i*3+1] = 0.8;
+            cols[i*3+2] = 1;
+        }
+
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+
+        const mat = new THREE.PointsMaterial({ size: 0.035, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending });
+        points = new THREE.Points(geo, mat);
+        scene.add(points);
+
+        updateShape(0);
+        animate();
+    }
+
+    function updateShape(index) {
+        currentShapeIndex = index;
+        document.getElementById('current-shape').innerText = `Shape: ${shapes[index].name}`;
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const p = shapes[index].func(i);
+            targetPositions[i*3] = p.x;
+            targetPositions[i*3+1] = p.y;
+            targetPositions[i*3+2] = p.z;
+        }
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const posAttr = points.geometry.attributes.position;
+        for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+            posAttr.array[i] += (targetPositions[i] - posAttr.array[i]) * 0.1;
+        }
+        posAttr.needsUpdate = true;
+        points.rotation.y += 0.003;
+        renderer.render(scene, camera);
+    }
+
+    // --- Eye Tracking Logic ---
+    const faceMesh = new FaceMesh({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true, // Required for iris tracking
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    faceMesh.onResults((results) => {
+        if (results.multiFaceLandmarks && results.multiFaceLandmarks[0]) {
+            const landmarks = results.multiFaceLandmarks[0];
+
+            // 1. Position tracking (Using the Left Iris center - landmark 468)
+            const iris = landmarks[468];
+            // Map 0-1 range to 3D space (-10 to 10)
+            const targetX = (iris.x - 0.5) * -18; 
+            const targetY = (iris.y - 0.5) * -12;
+            
+            points.position.x += (targetX - points.position.x) * 0.1;
+            points.position.y += (targetY - points.position.y) * 0.1;
+
+            // 2. Blink Detection (Distance between upper and lower eyelid)
+            // Left eye top (159) to bottom (145)
+            const topIdx = 159, botIdx = 145;
+            const eyeDist = Math.hypot(landmarks[topIdx].x - landmarks[botIdx].x, landmarks[topIdx].y - landmarks[botIdx].y);
+            
+            // If eye distance is very small, it's a blink
+            if (eyeDist < 0.012 && Date.now() - lastBlinkTime > 800) {
+                updateShape((currentShapeIndex + 1) % shapes.length);
+                points.material.color.setHSL(Math.random(), 0.7, 0.6);
+                lastBlinkTime = Date.now();
+            }
+        }
+    });
+
+    const videoElement = document.getElementById('video');
+    const cameraHelper = new Camera(videoElement, {
+        onFrame: async () => { await faceMesh.send({image: videoElement}); },
+        width: 640, height: 480
+    });
+
+    init();
+    cameraHelper.start();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
